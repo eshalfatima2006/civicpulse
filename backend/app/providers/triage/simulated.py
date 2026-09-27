@@ -1,5 +1,5 @@
-from app.schemas import Category, Priority, TriageResult
 from app.providers.triage.rules import RuleBasedTriage
+from app.schemas import Category, Priority, TriageResult
 
 
 class SimulatedTriage:
