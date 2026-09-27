@@ -134,6 +134,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -b /usr/local/bin
+          trivy --version
+
       - name: Build backend image
         run: docker buildx build --load -t civicpulse-backend:test ./backend
 
@@ -141,22 +146,10 @@ jobs:
         run: docker buildx build --load -t civicpulse-frontend:test ./frontend
 
       - name: Scan backend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: civicpulse-backend:test
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
-          format: table
+        run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 civicpulse-backend:test
 
       - name: Scan frontend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: civicpulse-frontend:test
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
-          format: table
+        run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 civicpulse-frontend:test
 
   integration:
     name: integration
