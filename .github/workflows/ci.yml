@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-type:
+    name: lint-and-type
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backend ruff
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Run backend mypy
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+        run: mypy app
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend eslint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+  test-backend:
+    name: test-backend
+    runs-on: ubuntu-latest
+    env:
+      TRIAGE_PROVIDER: simulated
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest-cov
+
+      - name: Run backend tests with coverage
+        working-directory: backend
+        env:
+          TRIAGE_PROVIDER: simulated
+          PYTHONPATH: .
+        run: pytest --cov=app --cov-report=term --cov-fail-under=65
+
+  test-frontend:
+    name: test-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npx vitest run
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker buildx build --load -t civicpulse-backend:test ./backend
+
+      - name: Build frontend image
+        run: docker buildx build --load -t civicpulse-frontend:test ./frontend
+
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker buildx build --load -t civicpulse-backend:test ./backend
+
+      - name: Build frontend image
+        run: docker buildx build --load -t civicpulse-frontend:test ./frontend
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: civicpulse-backend:test
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: civicpulse-frontend:test
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        run: cp .env.example .env
+
+      - name: Start services with Docker Compose
+        run: docker compose up -d --build
+
+      - name: Wait for /ready endpoint
+        run: |
+          for i in $(seq 1 60); do
+            if curl -s -f http://localhost:8000/ready | grep -q "ready"; then
+              echo "Backend /ready endpoint is ready!"
+              exit 0
+            fi
+            echo "Waiting for /ready endpoint... ($i/60)"
+            sleep 2
+          done
+          echo "Backend failed to become ready in time"
+          docker compose logs
+          exit 1
+
+      - name: POST a complaint
+        run: |
+          POST_RES=$(curl -s -f -X POST http://localhost:8000/api/complaints \
+            -H "Content-Type: application/json" \
+            -d '{"text": "A severe water leak is flooding the road", "location": "Main St 101"}')
+          echo "POST response: $POST_RES"
+          echo "$POST_RES" | python3 -c "import sys, json; d=json.load(sys.stdin); assert d['category']=='water', d"
+          echo "Assertion passed: category is water."
+          echo "$POST_RES" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])" > /tmp/cid
+
+      - name: GET complaint back
+        run: |
+          CID=$(cat /tmp/cid)
+          GET_RES=$(curl -s -f "http://localhost:8000/api/complaints/$CID")
+          echo "GET response: $GET_RES"
+          echo "$GET_RES" | python3 -c "import sys, json; d=json.load(sys.stdin); assert d['category']=='water', d"
+          echo "Assertion passed: GET returns water."
+
+      - name: Check X-Cache header on /api/stats
+        run: |
+          echo "Stats endpoint not implemented yet; skipping X-Cache check."
+
+      - name: Teardown services
+        if: always()
+        run: docker compose down -v
